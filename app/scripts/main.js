@@ -1,16 +1,31 @@
 var $ = require('jquery'),
     Backbone = require('backbone'),
     Marionette = require('backbone.marionette'),
+    OaArtist = require('./models/oa/artist'),
+    oaArtists, oaArtistsView,
     app;
 
 Backbone.$ = Marionette.$ = $;
 
-app = new Marionette.Application(),
+app = new Marionette.Application();
+window.app = app;
 
 app.addRegions({
-  test: '#test-container'
+  oa_artists_container: '#oa-artists-container'
 });
 
-console.log('wha!?');
+oaArtists = new OaArtist.collection();
+oaArtistsView = new OaArtist.collectionView({
+  collection: oaArtists
+});
+
+app.oa_artists_container.show(oaArtistsView);
+
+oaArtists.add({name: 'test'});
+oaArtists.add({name: 'blah'});
+
+$('body').on('blur', '#oa-artists-input', function() {
+  oaArtists.add({name: $(this).val()});
+});
 
 

@@ -1,6 +1,6 @@
 
 exports.index = function(req, res){
   res.render('index', {
-    title: 'lol stuff'
+    title: 'Aura-Combo'
   });
 };
