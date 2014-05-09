@@ -34,3 +34,4 @@ npm install
 gulp
 ```
 
+See your app at http://localhost:4000/
