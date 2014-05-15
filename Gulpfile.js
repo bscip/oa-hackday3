@@ -23,6 +23,24 @@ var gulp = require('gulp'),
     EXPRESS_ROOT = __dirname
     ;
 
+gulp.task('ds', function() {
+  var DoStuffApi = require('./util/dostuff'),
+      secret = require('./util/secret'),
+      DS = new DoStuffApi(secret.api_key_dostuff_sf);
+
+  DS.test();
+  DS.eventsCount(function(err, count) {
+    if (!err) {
+      console.log('There are '+counts.events+' events, over '+counts.pages+' pages of results');
+    }
+  });
+  DS.venuesCount(function(err, counts) {
+    if (!err) {
+      console.log('There are '+counts.venues+' venues, over '+counts.pages+' pages of results');
+    }
+  });
+});
+
 gulp.task('browserify', function() {
   return browserify('./app/scripts/main.js')
     .bundle()

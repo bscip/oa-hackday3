@@ -1,5 +1,7 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
 var $ = require('jquery'),
+    //OA = require('./oasdk/all.js'),
+    ai = require('./oasdk/aura.js'),
     Backbone = require('backbone'),
     Marionette = require('backbone.marionette'),
     OaArtist = require('./models/oa/artist'),
@@ -29,9 +31,10 @@ $('body').on('blur', '#oa-artists-input', function() {
   oaArtists.add({name: $(this).val()});
 });
 
+console.dir(ai);
 
 
-},{"./models/oa/artist":2,"backbone":7,"backbone.marionette":3,"jquery":9}],2:[function(require,module,exports){
+},{"./models/oa/artist":2,"./oasdk/aura.js":4,"backbone":16,"backbone.marionette":12,"jquery":20}],2:[function(require,module,exports){
 var $ = require('jquery'),
     Backbone = require('backbone'),
     Marionette = require('backbone.marionette'),
@@ -102,7 +105,1168 @@ OaArtist = {
 module.exports = OaArtist;
 
 
-},{"backbone":7,"backbone.marionette":3,"jquery":9,"lodash":10}],3:[function(require,module,exports){
+},{"backbone":16,"backbone.marionette":12,"jquery":20,"lodash":21}],3:[function(require,module,exports){
+/**
+ * We require OA to have been set up at this point so we can call config()
+ * to get API keys.
+ */
+
+/*global OA, define */
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  var $    = require('jquery'),
+      _    = require('underscore'),
+      util = require('./util'),
+      prop = util.getProperty,
+      root = this,
+      
+      OA_API = function(api) {
+        var cfg = function () {
+          var fn = prop(root, "OA.config") || require('./initialize')();
+          return fn();
+        };
+
+        function prep(endpoint, params, callback, errback, method) {
+          return {
+            timeout:  50000,
+            type:     typeof(method) == 'undefined' ? 'GET' : method,
+            data:     params,
+            success:  function(data, textStatus, jqXHR) {
+              callback(textStatus, data);
+            },
+            error:  function(jqXHR, textStatus, errorThrown) {
+              callback(textStatus, false);
+            }
+          };
+        }
+
+        function key(type) {
+          return type == 'stream' ? cfg().stream_key : cfg().info_key;
+        }
+
+        api.setConfig = function (conf) {
+          cfg = conf;
+        };
+
+        api.config = function () {
+          return _.clone(cfg());
+        };
+
+        api.artistSearch = function(endpoint, params, callback, method) {
+          var api_call = prep(endpoint, params, callback, method),
+              config = cfg();
+
+          api_call.data.limit = config.max_particles;
+          api_call.data.api_key = key('info');
+          api_call.url = config.base_api_url + '/search/' + endpoint; // + '?callback=?';
+
+          return $.ajax(api_call); // returns a jQuery.Deferred          
+        };
+
+        api.streamRequest = function(endpoint, params, callback, method) {
+          var api_call = prep(endpoint, params, callback, method),
+              config = cfg();
+
+          api_call.data.limit = config.max_particles;
+          api_call.data.api_key = key('info');
+          api_call.url = config.base_api_url + '/particles/' + endpoint; // + '?callback=?';
+
+          return $.ajax(api_call); // returns a jQuery.Deferred
+        };
+
+        api.infoRequest = function(endpoint, params, callback, method) {
+          var api_call = prep(endpoint, params, callback, method);
+          api_call.data.api_key = key('info');
+          api_call.url = cfg().base_api_url + '/info/' + endpoint; // + '?callback=' + callback_url;
+          
+          return $.ajax(api_call); // returns a jQuery.Deferred
+        };
+
+        api.sourceRequest = function(endpoint, params, callback, method) {
+          var api_call = prep(endpoint, params, callback, method);
+          api_call.data.api_key = key('info');
+          api_call.url = cfg().base_api_url + '/source/' + endpoint; // + '?callback=' + callback_url;
+          
+          return $.ajax(api_call); // returns a jQuery.Deferred
+        };
+
+        api.searchRequest = function(endpoint, params, callback, method) {
+          var api_call = prep(endpoint, params, callback, method);
+          api_call.data.api_key = key('info');
+          api_call.url = cfg().base_api_url + '/search/' + endpoint; // + '?callback=' + callback_url;
+          
+          return $.ajax(api_call); // returns a jQuery.Deferred
+        };
+
+        return api;
+      }(OA_API || {});
+
+  return OA_API;
+});
+
+},{"./initialize":5,"./util":10,"amdefine":11,"jquery":20,"underscore":22}],4:[function(require,module,exports){
+/*global define */
+// # Aura
+// Module representing an Aura. An Aura is a wrapper around a
+// collection of particles which are grouped by their relationship
+// with an Anchor (basically a noun in our system, eg, Coldplay, Dark
+// Side of the Moon, etc.)
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  var $ = require('jquery'),
+      _ = require('underscore'),
+      util  = require('./util'),
+      api = require('./api'),
+      prop  = util.getProperty,
+      Particle = require('./particle'),
+      ParticleCollection = require('./particleCollection'),
+      MediaCollection = require('./mediaCollection'),
+      Media = require('./media');
+  
+  // ## Aura()
+  // 
+  // Constructor for an Aura. Takes raw JSON returned by the API. In
+  // general, you should use one of the provided factory methods
+  // instead of accessing the constructor directly.
+  function Aura(data) {
+    this._data = Object.freeze({
+      particleCount: prop(data, "total_particles"),
+      anchor: prop(data, "anchor"),
+      nextParticleSet: prop(data, "next_particles"),
+      particles: new ParticleCollection(prop(data, "particles"))
+    });
+  }
+
+  // ### Instance methods
+  Aura.prototype = {
+    // #### particleCount()
+    //
+    // Accessor for the number of particles returned.
+    //
+    // **returns** *Number*
+    particleCount: function () { return this._data.particleCount; },
+    // #### anchor()
+    //
+    // Accessor for an associated anchor.
+    //
+    // **returns** *String*
+    anchor: function () { return this._data.anchor; },
+    // #### nexParticleSet()
+    //
+    // Accessor for the URI of the Aura containing the next set of
+    // particles.
+    //
+    // **returns** *String*
+    nextParticleSet: function () { return this._data.nextParticleSet; },
+    // #### particles()
+    //
+    // Accessor for the ParticleCollection containing the result set
+    // for this Aura.
+    //
+    // **returns** *ParticleCollection*
+    particles: function () { return this._data.particles; }
+  };
+
+  // ### Aura.api()
+  //
+  // Accessor to api
+  Aura.api = function () {
+    return api;
+  };
+
+  // ### Aura.fetchByOaArtistId()
+  //
+  // Factory method for an Aura found by OpenAura artist id.
+  //
+  // + **param** id OpenAura artist id (int).
+  // + **param** cb Callback. Is passed an Aura for the artist.
+  //
+  // **returns** *jQuery.Deffered*
+  Aura.fetchByOaArtistId = function (id, cb) {
+    return api.streamRequest('artists/' + id, {id_type: "oa:artist_id"}, function(status, data) {
+      cb(new Aura(data));
+    });
+  };
+
+  // ### Aura.fetchAuraByMbGid
+  //
+  // Factory method for an Aura found by Musicbrainz GID.
+  //
+  // + **param** id Musicbrainz GID.
+  // + **param** cb Callback. Is passed an Aura for the artist.
+  //
+  // **returns** *jQuery.Deferred*
+  Aura.fetchByMbGid = function (id, cb) {
+    return api.streamRequest('artists/' + id, {id_type: "musicbrainz:gid"}, function(status, data) {
+      cb(new Aura(data));
+    });
+  };
+
+  // ### Aura.fetchAuraByAnchorId()
+  // Factory method for an Aura found by OpenAura anchor id.
+  //
+  // + **param** id OpenAura Anchor ID (12-byte hexadecimal).
+  // + **param** cb Callback. Is passed an Aura for the artist.
+  //
+  // **returns** *jQuery.Deferred*
+  Aura.fetchByAnchorId = function (id, cb) {
+    return api.streamRequest('artists/' + id, {id_type: "oa:anchor_id"}, function(status, data) {
+      cb(new Aura(data));
+    });
+  };
+
+  return Aura;
+});
+
+},{"./api":3,"./media":6,"./mediaCollection":7,"./particle":8,"./particleCollection":9,"./util":10,"amdefine":11,"jquery":20,"underscore":22}],5:[function(require,module,exports){
+/*global define */
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+  define(function (require) {
+  var root = this;
+
+    return function (config) {
+      var OA = OA || root.OA || {},
+          baseCfg = {
+            "base_api_url": "http://api.openaura.com/v1",
+            "stream_key": "YOUR_STREAM_KEY",
+            "info_key": "YOUR_INFO_KEY",
+            "callback_url": "YOUR_CALLBACK_URL",
+            "max_particles": 100
+          };
+      
+      for (var key in baseCfg) {
+        config[key] = config[key] || baseCfg[key];
+      };
+      
+      return OA.config = function () { return config; };
+    };
+  });
+
+},{"amdefine":11}],6:[function(require,module,exports){
+/*global define */
+// # Media()
+// Module representing Media returned with a Particle. Media can
+// represent text, JSON data, or, most commonly, a URI for an image or
+// other consumable media.
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  var util = require('./util'),
+      prop = util.getProperty;
+  
+  // ## Media()
+  //
+  // Constructor. This takes the raw API response. Users of the SDK
+  // should use a factory method rather than calling this directly.
+  function Media(data) {
+    this._data = Object.freeze({
+      id: prop(data, "oa_media_id"),
+      mediaType: prop(data, "type"),
+      url: prop(data, "url"),
+      width: prop(data, "width"),
+      height: prop(data, "height"),
+      mime: prop(data, "mime"),
+      data: prop(data, "data")
+    });
+  }
+
+  // ### Instance methods
+  Media.prototype = {
+    // #### id()
+    // Accessor for media id.
+    //
+    // **returns** *Strings* a 12-byte hexidecimal id.
+    id: function () { return this._data.id; },
+    // #### mediaType()
+    // Accessor for media type.
+    //
+    // **returns** *String* image, video, embed, audio, json, text
+    mediaType: function () { return this._data.mediaType; },
+    // #### url()
+    // Accessor for media URL.
+    //
+    // **returns** *String* URI for media.
+    url: function () { return this._data.url; },
+    // #### width()
+    // Accessor for width.
+    // **returns** *Number* width of media in pixels.
+    width: function () { return this._data.width; },
+    // #### height()
+    // Accessor for height.
+    //
+    // **returns** *Number* height of media in pixels.
+    height: function () { return this._data.height; },
+    // #### mimeType()
+    // Accessor for mime type.
+    //
+    // **returns** *String* mime type of associated media.
+    mime: function () { return this._data.mime; },
+    // #### data()
+    // Accessor for JSON data.
+    //
+    // **returns** *Object* a JSON object with data represented as key
+    // value pairs.
+    data: function () { return this._data.data; },
+
+    // #### asObject()
+    //
+    // **returns** *Object* a plain JS Object with a copy of the data
+    // contained in this Media object.
+    asObject: function () {
+      return {
+        oa_media_id: this.id(),
+        type: this.mediaType(),
+        url: this.url(),
+        width: this.width(),
+        height: this.height(),
+        mime: this.mime(),
+        data: this.data()
+      };
+    }
+  };
+  
+  return Media;
+});
+
+},{"./util":10,"amdefine":11}],7:[function(require,module,exports){
+/*global define */
+// # MediaCollection
+// Module representing a collection of Media objects along with
+// convient operations for filtering and accessing the objects.
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  var _ = require('underscore'),
+      util = require('./util'),
+      prop = util.getProperty,
+      Media = require('./media');
+  
+  // ## MediaCollection()
+  //
+  // Constructor. This takes the raw API response. Users of the SDK
+  // should use a factory method rather than calling this directly.
+  function MediaCollection(data) {
+    this._data = _.map(data, function (m) {
+      return Object.freeze(new Media(m));
+    });
+  }
+
+  // ### Instance methods
+  MediaCollection.prototype = {
+    // #### smallerThan()
+    //
+    // + **param** w width in pixels
+    // + **param** h height in pixels
+    //
+    // **returns** *MediaCollection* with all Media objects which are smaller than
+    // given dimensions.
+    smallerThan: function (w, h) {
+      return new MediaCollection(
+        _.chain(this._data)
+          .filter(function(m) { return m.width() < w && m.height() < h;})
+          .map(function (m) { return m.asObject(); })
+          .value()
+      );
+    },
+
+    // #### largerThan()
+    //
+    // + **param** w width in pixels
+    // + **param** h height in pixels
+    //
+    // **returns** *MediaCollection* with all Media objects which are larger than
+    // given dimensions.
+    largerThan: function (w, h) {
+      return new MediaCollection(
+        _.chain(this._data)
+          .filter(function(m) { return m.width() > w && m.height() > h;})
+          .map(function (m) { return m.asObject(); })
+          .value()
+      );
+    },
+
+    // #### within()
+    //
+    // + **param** minW minimum width in pixels
+    // + **param** minH minimum height in pixels
+    // + **param** maxW maximum width in pixels
+    // + **param** maxH maximum height in pixels
+    //
+    // **returns** *MediaCollection* with all Media objects within min and max dimensions
+    within: function (minW, minH, maxW, maxH) {
+      return new MediaCollection(
+        _.chain(this._data)
+          .filter(function(m) { 
+            return m.width()  >= minW && 
+                   m.height() >= minH &&
+                   m.width()  <= maxW && 
+                   m.height() <= maxH;})
+          .map(function (m) { return m.asObject(); })
+          .value()
+      );
+    },
+
+    // #### length()
+    //
+    // **returns** *Number* the number of media objects in this
+    // MediaCollection.
+    length: function () {
+      return this._data.length;
+    },
+
+    // #### toArray()
+    //
+    // **returns** *Array* an array of Media objects in this
+    // MediaCollection.
+    toArray: function () {
+      return this._data.slice();
+    },
+
+    // #### each()
+    //
+    // Iterate through the MediaCollection and call fn on each Media.
+    //
+    // + **param** fn A callback which operates on a Media object.
+    each: function(fn) {
+      _.each(this._data, fn);
+    },
+
+    // #### filter()
+    //
+    // Filter the MediaCollection using a function that takes a Media
+    // object and returns a boolean. This will create a new
+    // MediaCollection containing only Media objects for which this
+    // function returned a truthy value.
+    //
+    // + **param** fn function that takes a Media object and returns a boolean.
+    //
+    // **returns** *MediaCollection* new MediaCollection containing all
+    // Media objects for which fn returned true.
+    filter: function(fn) {
+      return new MediaCollection(
+        _.chain(this._data)
+          .filter(fn)
+          .map(function (m) { return m.asObject(); })
+          .value()
+      );
+    },
+
+    // #### map()
+    //
+    // Iterate through all Media objects in this MediaCollection and
+    // return an array containing the results of calling fn on each.
+    //
+    // + **param** fn function that operates on a Media Object.
+    //
+    // **returns** *Array* array containing the results of performing fn
+    // on each Media object in this MediaCollection.
+    map: function(fn) {
+      return _.map(this._data, fn);
+    },
+
+    // #### first()
+    //
+    // **returns** *Media* the first media object
+    first: function () {
+      if (this._data.length)
+        return this._data[0];
+      else
+        return undefined;
+    },
+
+    // #### last()
+    //
+    // **returns** *Media* the last media object
+    last: function () {
+      return this._data.slice(-1).pop();
+    },
+    
+    // #### tail()
+    //
+    // **returns** *MediaCollection* a new MediaCollection containing all
+    // the Media in this MediaCollection, excuding the first.
+    tail: function () {
+      return new MediaCollection(
+        _.map(this._data.slice(1), function (m) { return m.asObject(); })
+      );
+    },
+
+    asObject: function () {
+      return _.map(this._data, function (m) { return m.asObject(); });
+    }
+  };
+  
+  return MediaCollection;
+});
+
+},{"./media":6,"./util":10,"amdefine":11,"underscore":22}],8:[function(require,module,exports){
+/*global define */
+// # Particle
+//
+// Module represnting a particle, which is the fundamental unit of
+// content in the OpenAura system.
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  var util  = require('./util'),
+      prop  = util.getProperty,
+      MediaCollection = require('./mediaCollection');
+  // ## Particle()
+  //
+  // Constructor. This takes the raw API response. Users of the SDK
+  // should use a factory method rather than calling this directly.  
+  function Particle(data) {
+    this._data = Object.freeze({
+      id: prop(data, "oa_particle_id"),
+      text: prop(data, "text"),
+      tags: prop(data, "tags"),
+      provider: prop(data, "source.provider") || prop(data, "provider"),
+      source: prop(data, "source"),
+      oaArtistId: prop(data, "oa_artist_id"),
+      profane: prop(data, "profane"),
+      date: prop(data, "date"),
+      media: new MediaCollection(prop(data, "media"))
+    });
+  }
+
+  // ### Instance methods
+  Particle.prototype = {
+    // #### id()
+    // Accessor for particle id.
+    //
+    // **returns** *String* a 12-byte hexidecimal id.
+    id: function () { return this._data.id; },
+
+    // #### text()
+    // Accessor for particle text. Can contain a caption, or in some
+    // cases, the actual text.
+    //
+    // **returns** *String* particle text.
+    text: function () { return this._data.text; },
+
+    // #### tags()
+    // Accessor for tags.
+    //
+    // **returns** *Array* string tags associated with this Particle.
+    tags: function () { return this._data.tags; },
+
+    // #### provider()
+    // Name of the particle's provider (the service from which this
+    // Particle was sourced).
+    //
+    // **returns** *String* name of content provider, eg, Facebook,
+    // Twitter, etc.
+    provider: function () { return this._data.provider; },
+
+    // #### source()
+    // JSON object containing information about the source of this
+    // Particle. A source represents not just the provider of the
+    // particle, but the specific user account, as well.
+    //
+    // **returns** *Object* javascript object containing information
+    // about this Particle's source.
+    source: function () { return this._data.source; },
+
+    // #### artistIds()
+    // OpenAura id for related artist.
+    //
+    // **returns** *Number* integer artist id.
+    oaArtistId: function () { return this._data.oaArtistId; },
+
+    // #### profane()
+    //
+    // **returns** *boolean* true if this particle was flagged by
+    // OpenAura's profanity filter.
+    profane: function () { return this._data.profane; },
+
+    // #### date()
+    // Accessor for particle date.
+    //
+    // **returns** *String* datetime associated with this Particle.
+    date: function () { return this._data.date; },
+
+    // #### media()
+    // Accessor for this particle's MediaCollection. Multiple Media
+    // objects here are representations of the same media. Ie, this
+    // will contain the same image in multiple sizes, or Media which
+    // represents a video along with an image thumb for that same
+    // video.
+    //
+    // **returns** *MediaCollection*
+    media: function () { return this._data.media; },
+
+    // #### asObject()
+    //
+    // **returns** *Object* a plain JS Object with a copy of the data
+    // contained in this Particle object.
+    asObject: function () {
+      return {
+        oa_particle_id: this.id(),
+        text: this.text(),
+        tags: this.tags(),
+        provider: this.provider(),
+        source: this.source(),
+        oa_artist_id: this.oaArtistId(),
+        profane: this.profane(),
+        date: this.date(),
+        media: this.media().asObject()
+      };
+    }
+  };
+  
+  return Particle;
+});
+
+},{"./mediaCollection":7,"./util":10,"amdefine":11}],9:[function(require,module,exports){
+/*global define */
+// # ParticleCollection
+//
+// Module representing a collection of Particle objects along with
+// convient operations for filtering and accessing the objects.
+//
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  var _ = require('underscore'),
+      util = require('./util'),
+      prop = util.getProperty,
+      Particle = require('./particle'),
+      Media = require('./media');
+  // ## ParticleCollection()
+  //
+  // Constructor. This takes the raw API response. Users of the SDK
+  // should use a factory method rather than calling this directly.
+  //
+  function ParticleCollection(data) {
+    this._data = _.map(data, function (p) {
+      return Object.freeze(new Particle(p));
+    });
+  }
+
+  // ### Instance Methods
+  //
+  ParticleCollection.prototype = {
+    // #### length()
+    //
+    // **returns** *Number* the number of Particles in this ParticleCollection.
+    //
+    length: function () {
+      return this._data.length;
+    },
+
+    // #### toArray()
+    //
+    // **returns** *Array* an array of Particle objects in this
+    // ParticleCollection.
+    //
+    toArray: function () {
+      return this._data.slice();
+    },
+
+    // #### each()
+    //
+    // Iterate through the ParticleCollection and call fn on each Particle.
+    //
+    // + **param** fn A callback which operates on a Particle object.
+    //
+    each: function (fn) {
+      _.each(this._data, fn);
+    },
+
+    // #### filter()
+    //
+    // Filter the ParticleCollection using a function that takes a Media
+    // object and returns a boolean. This will create a new
+    // ParticleCollection containing only Particle objects for which this
+    // function returned a truthy value.
+    //
+    // + **param** fn function that takes a Particle object and returns a boolean.
+    //
+    // **returns** *ParticleCollection* new ParticleCollection containing all
+    // Particle objects for which fn returned true.
+    //
+    filter: function (fn) {
+      return new ParticleCollection(
+        _.chain(this._data)
+          .filter(fn)
+          .map(function (p) {return p.asObject(); })
+          .value()
+      );
+    },
+
+    // #### filterByProvider()
+    //
+    // Do a case insensitive search of Particles in this
+    // ParticleCollection and filter by comparing the string to each
+    // Particle's provider name.
+    //
+    // + **param** name string name of the provider to match against.
+    //
+    // **returns** *ParticleCollection* a new ParticleCollection filtered by provider name.
+    //
+    filterByProvider: function (name) {
+      return this.filter(function (p) {
+        return new RegExp(name, "i").test(p.provider().name);
+      });
+    },
+
+    // #### filterByMedia()
+    //
+    // Filter Particles in this ParticleCollection by their
+    // MediaCollections. This will create a new ParticleCollection
+    // containing only Particle objects for which this function
+    // returned non-empty MediaCollections after being tested on each
+    // Media object in each Particle's MediaCollection.
+    //
+    // + **param** fn a function that fn is a function that tests against
+    // Media objects.
+    //
+    // **returns** *ParticleCollection* new ParicleCollection where every
+    // Particle contains at least one Media object m where fn(m)
+    // returned true.
+    //
+    filterByMedia: function (fn) {
+      return new ParticleCollection(
+        _.chain(this._data)
+          .filter(function (p) {
+            var m = p.media().filter(fn);
+            return m.length() > 0;
+          })
+          .map(function (p) {return p.asObject(); })
+          .value()
+      );
+    },
+
+    // #### withMediaLargerThan()
+    //
+    // Filter for Particles with at least one Media which is larger
+    // than the given dimensions in pixels.
+    //
+    // + **param** w width in pixels
+    // + **param** h height in pixels
+    //
+    // **returns** *ParticleCollection* new ParicleCollection where every
+    // Particle contains at least one Media object with width larger
+    // than w, and height larger than h.
+    //
+    withMediaLargerThan: function (w, h) {
+      return this.filter(function (p) { 
+        return p.media().largerThan(w, h).length() > 0; 
+      });
+    },
+
+    // #### withMediaSmallerThan()
+    //
+    // Filter for Particles with at least one Media which is smaller
+    // than the given dimensions in pixels.
+    //
+    // + **param** w width in pixels
+    // + **param** h height in pixels
+    //
+    // **returns** *ParticleCollection* new ParicleCollection where every
+    // Particle contains at least one Media object with width smaller
+    // than w, and height larger than h.
+    withMediaSmallerThan: function (w, h) {
+      return this.filter(function (p) { 
+        return p.media().smallerThan(w, h).length() > 0; 
+      });
+    },
+
+    // #### withMediaWithin()
+    //
+    // Filter for Particles with at least one Media which is within
+    // the given dimensions in pixels.
+    //
+    // + **param** minW minimum width in pixels
+    // + **param** minH minimum height in pixels
+    // + **param** maxW maximum width in pixels
+    // + **param** maxH maximum height in pixels
+    //
+    // **returns** *ParticleCollection* new ParicleCollection where every
+    // Particle contains at least one Media object with width >=
+    // minW, height >= minH, width <= maxW, and height <= maxH.
+    //
+    withMediaWithin: function (minW, minH, maxW, maxH) {
+      return this.filter(function (p) {
+        return p.media().within(minW, minH, maxW, maxH).length() > 0; 
+      });
+    },
+
+    // #### map()
+    //
+    // Iterate through all Particle objects in this ParticleCollection
+    // and return an array containing the results of calling fn on
+    // each.
+    //
+    // + **param** fn function that operates on a Particle Object.
+    //
+    // **returns** *Array* array containing the results of performing fn
+    // on each Particle object in this ParticleCollection.
+    //
+    map: function(fn) {
+      return _.map(this._data, fn);
+    },
+
+    // #### first()
+    //
+    // **returns** *Particle* the first Particle object
+    //
+    first: function () {
+      if (this._data.length)
+        return this._data[0];
+      else
+        return undefined;
+    },
+
+    // #### last()
+    //
+    // **returns** *Particle* the last Particle object
+    //
+    last: function () {
+      return this._data.slice(-1).pop();
+    },
+    
+    // #### tail()
+    //
+    // **returns** *ParticleCollection* a new ParticleCollection
+    // containing all the Particle in this ParticleCollection,
+    // excuding the first.
+    //
+    tail: function () {
+      return new ParticleCollection(
+        _.map(this._data.slice(1), function (p) { return p.asObject(); })
+      );
+    }
+  };
+  
+  return ParticleCollection;
+});
+
+},{"./media":6,"./particle":8,"./util":10,"amdefine":11,"underscore":22}],10:[function(require,module,exports){
+if (typeof define !== 'function') { var define = require('amdefine')(module) }
+define(function (require) {
+  function getProp(obj, propName) {
+    var propAr  = propName.split("."),
+        head    = propAr.shift(),
+        tailStr = propAr.join(".");
+
+    if (typeof obj != 'undefined' && obj != null && 
+        obj.hasOwnProperty(head) && typeof obj[head] != 'undefined' && 
+        obj[head] != null) {
+      if (propAr.length)
+        return getProp(obj[head], tailStr);
+      else
+        return obj[head];
+    } else {
+      return null;
+    }
+  }
+  
+  return {
+    getProperty: getProp
+  };
+});
+
+},{"amdefine":11}],11:[function(require,module,exports){
+(function (process,__filename){
+/** vim: et:ts=4:sw=4:sts=4
+ * @license amdefine 0.1.0 Copyright (c) 2011, The Dojo Foundation All Rights Reserved.
+ * Available via the MIT or new BSD license.
+ * see: http://github.com/jrburke/amdefine for details
+ */
+
+/*jslint node: true */
+/*global module, process */
+'use strict';
+
+/**
+ * Creates a define for node.
+ * @param {Object} module the "module" object that is defined by Node for the
+ * current module.
+ * @param {Function} [requireFn]. Node's require function for the current module.
+ * It only needs to be passed in Node versions before 0.5, when module.require
+ * did not exist.
+ * @returns {Function} a define function that is usable for the current node
+ * module.
+ */
+function amdefine(module, requireFn) {
+    'use strict';
+    var defineCache = {},
+        loaderCache = {},
+        alreadyCalled = false,
+        path = require('path'),
+        makeRequire, stringRequire;
+
+    /**
+     * Trims the . and .. from an array of path segments.
+     * It will keep a leading path segment if a .. will become
+     * the first path segment, to help with module name lookups,
+     * which act like paths, but can be remapped. But the end result,
+     * all paths that use this function should look normalized.
+     * NOTE: this method MODIFIES the input array.
+     * @param {Array} ary the array of path segments.
+     */
+    function trimDots(ary) {
+        var i, part;
+        for (i = 0; ary[i]; i+= 1) {
+            part = ary[i];
+            if (part === '.') {
+                ary.splice(i, 1);
+                i -= 1;
+            } else if (part === '..') {
+                if (i === 1 && (ary[2] === '..' || ary[0] === '..')) {
+                    //End of the line. Keep at least one non-dot
+                    //path segment at the front so it can be mapped
+                    //correctly to disk. Otherwise, there is likely
+                    //no path mapping for a path starting with '..'.
+                    //This can still fail, but catches the most reasonable
+                    //uses of ..
+                    break;
+                } else if (i > 0) {
+                    ary.splice(i - 1, 2);
+                    i -= 2;
+                }
+            }
+        }
+    }
+
+    function normalize(name, baseName) {
+        var baseParts;
+
+        //Adjust any relative paths.
+        if (name && name.charAt(0) === '.') {
+            //If have a base name, try to normalize against it,
+            //otherwise, assume it is a top-level require that will
+            //be relative to baseUrl in the end.
+            if (baseName) {
+                baseParts = baseName.split('/');
+                baseParts = baseParts.slice(0, baseParts.length - 1);
+                baseParts = baseParts.concat(name.split('/'));
+                trimDots(baseParts);
+                name = baseParts.join('/');
+            }
+        }
+
+        return name;
+    }
+
+    /**
+     * Create the normalize() function passed to a loader plugin's
+     * normalize method.
+     */
+    function makeNormalize(relName) {
+        return function (name) {
+            return normalize(name, relName);
+        };
+    }
+
+    function makeLoad(id) {
+        function load(value) {
+            loaderCache[id] = value;
+        }
+
+        load.fromText = function (id, text) {
+            //This one is difficult because the text can/probably uses
+            //define, and any relative paths and requires should be relative
+            //to that id was it would be found on disk. But this would require
+            //bootstrapping a module/require fairly deeply from node core.
+            //Not sure how best to go about that yet.
+            throw new Error('amdefine does not implement load.fromText');
+        };
+
+        return load;
+    }
+
+    makeRequire = function (systemRequire, exports, module, relId) {
+        function amdRequire(deps, callback) {
+            if (typeof deps === 'string') {
+                //Synchronous, single module require('')
+                return stringRequire(systemRequire, exports, module, deps, relId);
+            } else {
+                //Array of dependencies with a callback.
+
+                //Convert the dependencies to modules.
+                deps = deps.map(function (depName) {
+                    return stringRequire(systemRequire, exports, module, depName, relId);
+                });
+
+                //Wait for next tick to call back the require call.
+                process.nextTick(function () {
+                    callback.apply(null, deps);
+                });
+            }
+        }
+
+        amdRequire.toUrl = function (filePath) {
+            if (filePath.indexOf('.') === 0) {
+                return normalize(filePath, path.dirname(module.filename));
+            } else {
+                return filePath;
+            }
+        };
+
+        return amdRequire;
+    };
+
+    //Favor explicit value, passed in if the module wants to support Node 0.4.
+    requireFn = requireFn || function req() {
+        return module.require.apply(module, arguments);
+    };
+
+    function runFactory(id, deps, factory) {
+        var r, e, m, result;
+
+        if (id) {
+            e = loaderCache[id] = {};
+            m = {
+                id: id,
+                uri: __filename,
+                exports: e
+            };
+            r = makeRequire(requireFn, e, m, id);
+        } else {
+            //Only support one define call per file
+            if (alreadyCalled) {
+                throw new Error('amdefine with no module ID cannot be called more than once per file.');
+            }
+            alreadyCalled = true;
+
+            //Use the real variables from node
+            //Use module.exports for exports, since
+            //the exports in here is amdefine exports.
+            e = module.exports;
+            m = module;
+            r = makeRequire(requireFn, e, m, module.id);
+        }
+
+        //If there are dependencies, they are strings, so need
+        //to convert them to dependency values.
+        if (deps) {
+            deps = deps.map(function (depName) {
+                return r(depName);
+            });
+        }
+
+        //Call the factory with the right dependencies.
+        if (typeof factory === 'function') {
+            result = factory.apply(m.exports, deps);
+        } else {
+            result = factory;
+        }
+
+        if (result !== undefined) {
+            m.exports = result;
+            if (id) {
+                loaderCache[id] = m.exports;
+            }
+        }
+    }
+
+    stringRequire = function (systemRequire, exports, module, id, relId) {
+        //Split the ID by a ! so that
+        var index = id.indexOf('!'),
+            originalId = id,
+            prefix, plugin;
+
+        if (index === -1) {
+            id = normalize(id, relId);
+
+            //Straight module lookup. If it is one of the special dependencies,
+            //deal with it, otherwise, delegate to node.
+            if (id === 'require') {
+                return makeRequire(systemRequire, exports, module, relId);
+            } else if (id === 'exports') {
+                return exports;
+            } else if (id === 'module') {
+                return module;
+            } else if (loaderCache.hasOwnProperty(id)) {
+                return loaderCache[id];
+            } else if (defineCache[id]) {
+                runFactory.apply(null, defineCache[id]);
+                return loaderCache[id];
+            } else {
+                if(systemRequire) {
+                    return systemRequire(originalId);
+                } else {
+                    throw new Error('No module with ID: ' + id);
+                }
+            }
+        } else {
+            //There is a plugin in play.
+            prefix = id.substring(0, index);
+            id = id.substring(index + 1, id.length);
+
+            plugin = stringRequire(systemRequire, exports, module, prefix, relId);
+
+            if (plugin.normalize) {
+                id = plugin.normalize(id, makeNormalize(relId));
+            } else {
+                //Normalize the ID normally.
+                id = normalize(id, relId);
+            }
+
+            if (loaderCache[id]) {
+                return loaderCache[id];
+            } else {
+                plugin.load(id, makeRequire(systemRequire, exports, module, relId), makeLoad(id), {});
+
+                return loaderCache[id];
+            }
+        }
+    };
+
+    //Create a define function specific to the module asking for amdefine.
+    function define(id, deps, factory) {
+        if (Array.isArray(id)) {
+            factory = deps;
+            deps = id;
+            id = undefined;
+        } else if (typeof id !== 'string') {
+            factory = id;
+            id = deps = undefined;
+        }
+
+        if (deps && !Array.isArray(deps)) {
+            factory = deps;
+            deps = undefined;
+        }
+
+        if (!deps) {
+            deps = ['require', 'exports', 'module'];
+        }
+
+        //Set up properties for this module. If an ID, then use
+        //internal cache. If no ID, then use the external variables
+        //for this node module.
+        if (id) {
+            //Put the module in deep freeze until there is a
+            //require call for it.
+            defineCache[id] = [id, deps, factory];
+        } else {
+            runFactory(id, deps, factory);
+        }
+    }
+
+    //define.require, which has access to all the values in the
+    //cache. Useful for AMD modules that all have IDs in the file,
+    //but need to finally export a value to node based on one of those
+    //IDs.
+    define.require = function (id) {
+        if (loaderCache[id]) {
+            return loaderCache[id];
+        }
+
+        if (defineCache[id]) {
+            runFactory.apply(null, defineCache[id]);
+            return loaderCache[id];
+        }
+    };
+
+    define.amd = {};
+
+    return define;
+}
+
+module.exports = amdefine;
+
+}).call(this,require("/Users/brian/node/oa-hackday3/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"),"/../../node_modules/amdefine/amdefine.js")
+},{"/Users/brian/node/oa-hackday3/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":18,"path":19}],12:[function(require,module,exports){
 // MarionetteJS (Backbone.Marionette)
 // ----------------------------------
 // v1.8.5
@@ -2578,7 +3742,7 @@ module.exports = OaArtist;
 
 }));
 
-},{"backbone":7,"backbone.babysitter":4,"backbone.wreqr":5,"underscore":6}],4:[function(require,module,exports){
+},{"backbone":16,"backbone.babysitter":13,"backbone.wreqr":14,"underscore":15}],13:[function(require,module,exports){
 // Backbone.BabySitter
 // -------------------
 // v0.1.4
@@ -2770,7 +3934,7 @@ module.exports = OaArtist;
 
 }));
 
-},{"backbone":7,"underscore":6}],5:[function(require,module,exports){
+},{"backbone":16,"underscore":15}],14:[function(require,module,exports){
 // Backbone.Wreqr (Backbone.Marionette)
 // ----------------------------------
 // v1.3.1
@@ -3212,7 +4376,7 @@ module.exports = OaArtist;
 
 }));
 
-},{"backbone":7,"underscore":6}],6:[function(require,module,exports){
+},{"backbone":16,"underscore":15}],15:[function(require,module,exports){
 //     Underscore.js 1.6.0
 //     http://underscorejs.org
 //     (c) 2009-2014 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -4557,7 +5721,7 @@ module.exports = OaArtist;
   }
 }).call(this);
 
-},{}],7:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 //     Backbone.js 1.1.2
 
 //     (c) 2010-2014 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -6167,9 +7331,299 @@ module.exports = OaArtist;
 
 }));
 
-},{"underscore":8}],8:[function(require,module,exports){
-module.exports=require(6)
-},{}],9:[function(require,module,exports){
+},{"underscore":17}],17:[function(require,module,exports){
+module.exports=require(15)
+},{}],18:[function(require,module,exports){
+// shim for using process in browser
+
+var process = module.exports = {};
+
+process.nextTick = (function () {
+    var canSetImmediate = typeof window !== 'undefined'
+    && window.setImmediate;
+    var canPost = typeof window !== 'undefined'
+    && window.postMessage && window.addEventListener
+    ;
+
+    if (canSetImmediate) {
+        return function (f) { return window.setImmediate(f) };
+    }
+
+    if (canPost) {
+        var queue = [];
+        window.addEventListener('message', function (ev) {
+            var source = ev.source;
+            if ((source === window || source === null) && ev.data === 'process-tick') {
+                ev.stopPropagation();
+                if (queue.length > 0) {
+                    var fn = queue.shift();
+                    fn();
+                }
+            }
+        }, true);
+
+        return function nextTick(fn) {
+            queue.push(fn);
+            window.postMessage('process-tick', '*');
+        };
+    }
+
+    return function nextTick(fn) {
+        setTimeout(fn, 0);
+    };
+})();
+
+process.title = 'browser';
+process.browser = true;
+process.env = {};
+process.argv = [];
+
+function noop() {}
+
+process.on = noop;
+process.once = noop;
+process.off = noop;
+process.emit = noop;
+
+process.binding = function (name) {
+    throw new Error('process.binding is not supported');
+}
+
+// TODO(shtylman)
+process.cwd = function () { return '/' };
+process.chdir = function (dir) {
+    throw new Error('process.chdir is not supported');
+};
+
+},{}],19:[function(require,module,exports){
+(function (process){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// resolves . and .. elements in a path array with directory names there
+// must be no slashes, empty elements, or device names (c:\) in the array
+// (so also no leading and trailing slashes - it does not distinguish
+// relative and absolute paths)
+function normalizeArray(parts, allowAboveRoot) {
+  // if the path tries to go above the root, `up` ends up > 0
+  var up = 0;
+  for (var i = parts.length - 1; i >= 0; i--) {
+    var last = parts[i];
+    if (last === '.') {
+      parts.splice(i, 1);
+    } else if (last === '..') {
+      parts.splice(i, 1);
+      up++;
+    } else if (up) {
+      parts.splice(i, 1);
+      up--;
+    }
+  }
+
+  // if the path is allowed to go above the root, restore leading ..s
+  if (allowAboveRoot) {
+    for (; up--; up) {
+      parts.unshift('..');
+    }
+  }
+
+  return parts;
+}
+
+// Split a filename into [root, dir, basename, ext], unix version
+// 'root' is just a slash, or nothing.
+var splitPathRe =
+    /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
+var splitPath = function(filename) {
+  return splitPathRe.exec(filename).slice(1);
+};
+
+// path.resolve([from ...], to)
+// posix version
+exports.resolve = function() {
+  var resolvedPath = '',
+      resolvedAbsolute = false;
+
+  for (var i = arguments.length - 1; i >= -1 && !resolvedAbsolute; i--) {
+    var path = (i >= 0) ? arguments[i] : process.cwd();
+
+    // Skip empty and invalid entries
+    if (typeof path !== 'string') {
+      throw new TypeError('Arguments to path.resolve must be strings');
+    } else if (!path) {
+      continue;
+    }
+
+    resolvedPath = path + '/' + resolvedPath;
+    resolvedAbsolute = path.charAt(0) === '/';
+  }
+
+  // At this point the path should be resolved to a full absolute path, but
+  // handle relative paths to be safe (might happen when process.cwd() fails)
+
+  // Normalize the path
+  resolvedPath = normalizeArray(filter(resolvedPath.split('/'), function(p) {
+    return !!p;
+  }), !resolvedAbsolute).join('/');
+
+  return ((resolvedAbsolute ? '/' : '') + resolvedPath) || '.';
+};
+
+// path.normalize(path)
+// posix version
+exports.normalize = function(path) {
+  var isAbsolute = exports.isAbsolute(path),
+      trailingSlash = substr(path, -1) === '/';
+
+  // Normalize the path
+  path = normalizeArray(filter(path.split('/'), function(p) {
+    return !!p;
+  }), !isAbsolute).join('/');
+
+  if (!path && !isAbsolute) {
+    path = '.';
+  }
+  if (path && trailingSlash) {
+    path += '/';
+  }
+
+  return (isAbsolute ? '/' : '') + path;
+};
+
+// posix version
+exports.isAbsolute = function(path) {
+  return path.charAt(0) === '/';
+};
+
+// posix version
+exports.join = function() {
+  var paths = Array.prototype.slice.call(arguments, 0);
+  return exports.normalize(filter(paths, function(p, index) {
+    if (typeof p !== 'string') {
+      throw new TypeError('Arguments to path.join must be strings');
+    }
+    return p;
+  }).join('/'));
+};
+
+
+// path.relative(from, to)
+// posix version
+exports.relative = function(from, to) {
+  from = exports.resolve(from).substr(1);
+  to = exports.resolve(to).substr(1);
+
+  function trim(arr) {
+    var start = 0;
+    for (; start < arr.length; start++) {
+      if (arr[start] !== '') break;
+    }
+
+    var end = arr.length - 1;
+    for (; end >= 0; end--) {
+      if (arr[end] !== '') break;
+    }
+
+    if (start > end) return [];
+    return arr.slice(start, end - start + 1);
+  }
+
+  var fromParts = trim(from.split('/'));
+  var toParts = trim(to.split('/'));
+
+  var length = Math.min(fromParts.length, toParts.length);
+  var samePartsLength = length;
+  for (var i = 0; i < length; i++) {
+    if (fromParts[i] !== toParts[i]) {
+      samePartsLength = i;
+      break;
+    }
+  }
+
+  var outputParts = [];
+  for (var i = samePartsLength; i < fromParts.length; i++) {
+    outputParts.push('..');
+  }
+
+  outputParts = outputParts.concat(toParts.slice(samePartsLength));
+
+  return outputParts.join('/');
+};
+
+exports.sep = '/';
+exports.delimiter = ':';
+
+exports.dirname = function(path) {
+  var result = splitPath(path),
+      root = result[0],
+      dir = result[1];
+
+  if (!root && !dir) {
+    // No dirname whatsoever
+    return '.';
+  }
+
+  if (dir) {
+    // It has a dirname, strip trailing slash
+    dir = dir.substr(0, dir.length - 1);
+  }
+
+  return root + dir;
+};
+
+
+exports.basename = function(path, ext) {
+  var f = splitPath(path)[2];
+  // TODO: make this comparison case-insensitive on windows?
+  if (ext && f.substr(-1 * ext.length) === ext) {
+    f = f.substr(0, f.length - ext.length);
+  }
+  return f;
+};
+
+
+exports.extname = function(path) {
+  return splitPath(path)[3];
+};
+
+function filter (xs, f) {
+    if (xs.filter) return xs.filter(f);
+    var res = [];
+    for (var i = 0; i < xs.length; i++) {
+        if (f(xs[i], i, xs)) res.push(xs[i]);
+    }
+    return res;
+}
+
+// String.prototype.substr - negative index don't work in IE8
+var substr = 'ab'.substr(-1) === 'b'
+    ? function (str, start, len) { return str.substr(start, len) }
+    : function (str, start, len) {
+        if (start < 0) start = str.length + start;
+        return str.substr(start, len);
+    }
+;
+
+}).call(this,require("/Users/brian/node/oa-hackday3/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"))
+},{"/Users/brian/node/oa-hackday3/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":18}],20:[function(require,module,exports){
 /*!
  * jQuery JavaScript Library v2.1.1
  * http://jquery.com/
@@ -15361,7 +16815,7 @@ return jQuery;
 
 }));
 
-},{}],10:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 (function (global){
 /**
  * @license
@@ -22150,4 +23604,6 @@ return jQuery;
 }.call(this));
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],22:[function(require,module,exports){
+module.exports=require(15)
 },{}]},{},[1])

@@ -1,4 +1,6 @@
 var $ = require('jquery'),
+    //OA = require('./oasdk/all.js'),
+    ai = require('./oasdk/aura.js'),
     Backbone = require('backbone'),
     Marionette = require('backbone.marionette'),
     OaArtist = require('./models/oa/artist'),
@@ -28,4 +30,5 @@ $('body').on('blur', '#oa-artists-input', function() {
   oaArtists.add({name: $(this).val()});
 });
 
+console.dir(ai);
 
